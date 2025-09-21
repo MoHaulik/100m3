@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Olympic 100m AR Runner - Meta Quest 3</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.150.1/build/three.module.js"
+    }
+  }
+  </script>
+  <style>
+    body { 
+      margin: 0; 
+      overflow: hidden;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #1e3c72, #2a5298);
+    }
+    #overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    #start-button {
+      width: 100%;
+      height: 100%;
+      font-size: 120px;
+      background: linear-gradient(135deg, #FFD700, #FFA500);
+      color: white;
+      border: none;
+      border-radius: 0;
+      box-shadow: 0 4px 15px rgba(255, 215, 0, 0.5), 0 0 20px rgba(255, 215, 0, 0.3);
+      cursor: pointer;
+      transition: all 0.3s ease;
+      text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    #start-button:hover {
+      background: linear-gradient(135deg, #FFA500, #FF8C00);
+      box-shadow: 0 6px 20px rgba(255, 215, 0, 0.6), 0 0 30px rgba(255, 215, 0, 0.4);
+    }
+    .webxr-hidden { display: none !important; }
+    #hud {
+      position: absolute;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: white;
+      font-size: 24px;
+      font-weight: bold;
+      text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+      z-index: 100;
+      text-align: center;
+      display: none;
+    }
+    #countdown {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 120px;
+      color: #FFD700;
+      font-weight: bold;
+      text-shadow: 4px 4px 8px rgba(0,0,0,0.8);
+      z-index: 101;
+      display: none;
+    }
+    #result {
+      position: absolute;
+      top: 40%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 48px;
+      color: white;
+      font-weight: bold;
+      text-shadow: 3px 3px 6px rgba(0,0,0,0.8);
+      z-index: 102;
+      display: none;
+      text-align: center;
+      background: rgba(0,0,0,0.7);
+      padding: 20px;
+      border-radius: 10px;
+      border: 3px solid #FFD700;
+    }
+    .best-time {
+      font-size: 20px;
+      color: #FFD700;
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <button id="start-button">
+      <span style="font-size: 180px;">🏃‍♂️</span>
+      <span style="font-size: 60px;">100m SPRINT</span>
+      <span style="font-size: 30px; opacity: 0.8;">Tap to Start</span>
+    </button>
+  </div>
+  <div id="hud">
+    <div id="distance">0m</div>
+    <div id="time">0.00s</div>
+    <div id="speed" style="font-size: 18px; color: #FFD700;">0 km/h</div>
+  </div>
+  <div id="countdown"></div>
+  <div id="result">
+    <div id="result-text"></div>
+    <div id="result-time"></div>
+    <div class="best-time" id="best-time"></div>
+    <div style="margin-top: 20px; font-size: 24px;">Hold controllers up to race again</div>
+  </div>
+  <script type="module">
+    import * as THREE from 'three';
+
+    let camera, scene, renderer, clock = new THREE.Clock();
+    let xrSession = null;
+    let controllers = [], controllerStates = [{y: 0, lastY: 0, velocity: 0}, {y: 0, lastY: 0, velocity: 0}];
+    let runner, runnerSpeed = 0, runnerAnimPhase = 0, runnerDistance = 0;
+    let trackSegments = [], trackSpeed = 0;
+    let opponents = [], opponentData = [];
+    let finishLine, raceStarted = false, raceTime = 0, raceFinished = false;
+    let bestTime = localStorage.getItem('bestTime100m') ? parseFloat(localStorage.getItem('bestTime100m')) : null;
+    let countdownActive = false, gameState = 'waiting'; // waiting, countdown, racing, finished
+    const TRACK_LENGTH = 50, SEGMENT_SIZE = 2, RACE_DISTANCE = 100;
+    
+    // Controller selection
+    let isControllerSelectionPhase = false, controllerSelectionStartTime = 0;
+    let controllerHoldStartTime = {}, selectedController = null;
+    const CONTROLLER_SELECTION_DURATION = 5000, CONTROLLER_HOLD_DURATION = 2000;
+    
+    // Clap to exit
+    let clapStartTime = 0, isClapDetected = false;
+    const CLAP_HOLD_DURATION = 2000, CLAP_DISTANCE_THRESHOLD = 0.15;
+
+    // Enhanced opponent profiles - much faster!
+    const OPPONENT_PROFILES = [
+      {name: "Bolt", color: 0x00AA00, jerseyColor: 0xFFD700, speed: 1.15, lane: -0.45, acceleration: 1.2},
+      {name: "Blake", color: 0x009900, jerseyColor: 0x000000, speed: 1.12, lane: -0.15, acceleration: 1.15},
+      {name: "Gatlin", color: 0x0052cc, jerseyColor: 0xFFFFFF, speed: 1.08, lane: 0.15, acceleration: 1.1},
+      {name: "Powell", color: 0xFFAA00, jerseyColor: 0x00AA00, speed: 1.05, lane: 0.45, acceleration: 1.08}
+    ];
+
+    init();
+
+    function init() {
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      renderer.setClearColor(0x000000, 0);
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      document.body.appendChild(renderer.domElement);
+
+      // Olympic lighting
+      scene.add(new THREE.AmbientLight(0x606060, 1.5));
+      const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
+      sunLight.position.set(10, 20, 10);
+      sunLight.castShadow = true;
+      sunLight.shadow.mapSize.width = 2048;
+      sunLight.shadow.mapSize.height = 2048;
+      scene.add(sunLight);
+
+      // Stadium lights with glow
+      for(let i = 0; i < 4; i++) {
+        const spotLight = new THREE.SpotLight(0xffffff, 0.8, 50, Math.PI / 3);
+        spotLight.position.set(i % 2 === 0 ? -5 : 5, 15, -15 + i * 10);
+        scene.add(spotLight);
+      }
+
+      createRunner();
+      createOpponents();
+      createTrack();
+      createFinishLine();
+      
+      document.getElementById('start-button').addEventListener('click', startARSession);
+      window.addEventListener('resize', onWindowResize);
+    }
+
+    function createDetailedAthlete(primaryColor = 0x0066ff, jerseyColor = 0xFFFFFF, isPlayer = false) {
+      const group = new THREE.Group();
+      
+      // Torso with jersey
+      const torsoGeo = new THREE.CapsuleGeometry(0.035, 0.07, 8, 12);
+      const jerseyMat = new THREE.MeshPhongMaterial({ 
+        color: jerseyColor,
+        emissive: jerseyColor,
+        emissiveIntensity: 0.1,
+        shininess: 150
+      });
+      const torso = new THREE.Mesh(torsoGeo, jerseyMat);
+      torso.castShadow = true;
+      group.add(torso);
+      
+      // Jersey number/stripe
+      const stripeGeo = new THREE.BoxGeometry(0.03, 0.04, 0.002);
+      const stripeMat = new THREE.MeshPhongMaterial({ 
+        color: isPlayer ? 0xFFD700 : primaryColor,
+        emissive: isPlayer ? 0xFFD700 : primaryColor,
+        emissiveIntensity: 0.3
+      });
+      const stripe = new THREE.Mesh(stripeGeo, stripeMat);
+      stripe.position.set(0, 0, 0.036);
+      group.add(stripe);
+      
+      // Head with more detail
+      const headGroup = new THREE.Group();
+      const headGeo = new THREE.SphereGeometry(0.025, 12, 8);
+      const skinMat = new THREE.MeshPhongMaterial({ 
+        color: 0x8B7355,
+        shininess: 80
+      });
+      const head = new THREE.Mesh(headGeo, skinMat);
+      head.castShadow = true;
+      headGroup.add(head);
+      
+      // Sunglasses/Visor
+      const visorGeo = new THREE.BoxGeometry(0.04, 0.012, 0.005);
+      const visorMat = new THREE.MeshPhongMaterial({ 
+        color: 0x000000,
+        shininess: 200,
+        specular: 0xFFFFFF
+      });
+      const visor = new THREE.Mesh(visorGeo, visorMat);
+      visor.position.set(0, 0.005, 0.024);
+      headGroup.add(visor);
+      
+      headGroup.position.y = 0.07;
+      group.add(headGroup);
+      
+      // Muscular arms with skin tone
+      const armGeo = new THREE.CapsuleGeometry(0.014, 0.055, 6, 8);
+      const armMat = new THREE.MeshPhongMaterial({ 
+        color: 0x8B7355,
+        shininess: 60
+      });
+      
+      const leftArmGroup = new THREE.Group();
+      const leftArm = new THREE.Mesh(armGeo, armMat);
+      leftArm.castShadow = true;
+      leftArmGroup.add(leftArm);
+      leftArmGroup.position.set(-0.045, 0.01, 0);
+      leftArmGroup.name = 'leftArm';
+      group.add(leftArmGroup);
+      
+      const rightArmGroup = new THREE.Group();
+      const rightArm = new THREE.Mesh(armGeo, armMat);
+      rightArm.castShadow = true;
+      rightArmGroup.add(rightArm);
+      rightArmGroup.position.set(0.045, 0.01, 0);
+      rightArmGroup.name = 'rightArm';
+      group.add(rightArmGroup);
+      
+      // Athletic shorts
+      const shortsGeo = new THREE.CylinderGeometry(0.035, 0.03, 0.04, 8);
+      const shortsMat = new THREE.MeshPhongMaterial({ 
+        color: primaryColor,
+        emissive: primaryColor,
+        emissiveIntensity: 0.1
+      });
+      const shorts = new THREE.Mesh(shortsGeo, shortsMat);
+      shorts.position.y = -0.06;
+      shorts.castShadow = true;
+      group.add(shorts);
+      
+      // Muscular legs with skin tone
+      const thighGeo = new THREE.CapsuleGeometry(0.018, 0.04, 6, 8);
+      const calfGeo = new THREE.CapsuleGeometry(0.015, 0.035, 6, 8);
+      
+      // Left leg (thigh + calf)
+      const leftLegGroup = new THREE.Group();
+      const leftThigh = new THREE.Mesh(thighGeo, armMat);
+      leftThigh.position.y = -0.02;
+      leftThigh.castShadow = true;
+      leftLegGroup.add(leftThigh);
+      
+      const leftCalf = new THREE.Mesh(calfGeo, armMat);
+      leftCalf.position.y = -0.06;
+      leftCalf.castShadow = true;
+      leftLegGroup.add(leftCalf);
+      
+      leftLegGroup.position.set(-0.02, -0.08, 0);
+      leftLegGroup.name = 'leftLeg';
+      group.add(leftLegGroup);
+      
+      // Right leg (thigh + calf)
+      const rightLegGroup = new THREE.Group();
+      const rightThigh = new THREE.Mesh(thighGeo, armMat);
+      rightThigh.position.y = -0.02;
+      rightThigh.castShadow = true;
+      rightLegGroup.add(rightThigh);
+      
+      const rightCalf = new THREE.Mesh(calfGeo, armMat);
+      rightCalf.position.y = -0.06;
+      rightCalf.castShadow = true;
+      rightLegGroup.add(rightCalf);
+      
+      rightLegGroup.position.set(0.02, -0.08, 0);
+      rightLegGroup.name = 'rightLeg';
+      group.add(rightLegGroup);
+      
+      // Running shoes
+      const shoeGeo = new THREE.BoxGeometry(0.02, 0.01, 0.04);
+      const shoeMat = new THREE.MeshPhongMaterial({ 
+        color: isPlayer ? 0xFFD700 : 0xFFFFFF,
+        emissive: isPlayer ? 0xFFAA00 : 0xFFFFFF,
+        emissiveIntensity: 0.2
+      });
+      
+      const leftShoe = new THREE.Mesh(shoeGeo, shoeMat);
+      leftShoe.position.set(-0.02, -0.19, 0.01);
+      leftShoe.castShadow = true;
+      group.add(leftShoe);
+      
+      const rightShoe = new THREE.Mesh(shoeGeo, shoeMat);
+      rightShoe.position.set(0.02, -0.19, 0.01);
+      rightShoe.castShadow = true;
+      group.add(rightShoe);
+      
+      return group;
+    }
+
+    function createRunner() {
+      runner = createDetailedAthlete(0x0066ff, 0xFFD700, true);
+      runner.position.set(0, 0, -0.8);
+      scene.add(runner);
+    }
+
+    function createOpponents() {
+      OPPONENT_PROFILES.forEach((profile, i) => {
+        const opponent = createDetailedAthlete(profile.color, profile.jerseyColor, false);
+        opponent.position.set(profile.lane, 0, -0.8);
+        scene.add(opponent);
+        opponents.push(opponent);
+        opponentData.push({
+          distance: 0,
+          speed: profile.speed,
+          acceleration: profile.acceleration,
+          currentSpeed: 0,
+          animPhase: Math.random() * Math.PI,
+          profile: profile,
+          finished: false,
+          finishTime: 0
+        });
+      });
+    }
+
+    function createTrack() {
+      // Track surface with better textures
+      const laneWidth = 0.15;
+      const laneColors = [0x8B4513, 0xA0522D];
+      
+      for (let i = 0; i < TRACK_LENGTH; i++) {
+        const segment = new THREE.Group();
+        
+        // Create 6 lanes with texture variation
+        for (let lane = -3; lane <= 2; lane++) {
+          const laneGeo = new THREE.PlaneGeometry(laneWidth, SEGMENT_SIZE);
+          const laneMat = new THREE.MeshPhongMaterial({ 
+            color: laneColors[(lane + 3) % 2],
+            roughness: 0.8,
+            side: THREE.DoubleSide
+          });
+          const laneMesh = new THREE.Mesh(laneGeo, laneMat);
+          laneMesh.rotation.x = -Math.PI / 2;
+          laneMesh.position.set(lane * laneWidth, -0.2, 0);
+          laneMesh.receiveShadow = true;
+          segment.add(laneMesh);
+        }
+        
+        // Lane lines
+        for (let lane = -2; lane <= 2; lane++) {
+          const lineGeo = new THREE.PlaneGeometry(0.01, SEGMENT_SIZE);
+          const lineMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+          const line = new THREE.Mesh(lineGeo, lineMat);
+          line.rotation.x = -Math.PI / 2;
+          line.position.set(lane * laneWidth - laneWidth/2, -0.199, 0);
+          segment.add(line);
+        }
+        
+        // Distance markers every 10m
+        if (i % 5 === 0) {
+          const markerGeo = new THREE.BoxGeometry(1, 0.002, 0.08);
+          const markerMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+          const marker = new THREE.Mesh(markerGeo, markerMat);
+          marker.position.set(0, -0.198, 0);
+          segment.add(marker);
+          
+          // Distance number boards
+          const boardGeo = new THREE.BoxGeometry(0.15, 0.3, 0.02);
+          const boardMat = new THREE.MeshPhongMaterial({
+            color: 0x0066ff,
+            emissive: 0x0033aa,
+            emissiveIntensity: 0.3
+          });
+          const board = new THREE.Mesh(boardGeo, boardMat);
+          board.position.set(-0.8, 0, 0);
+          board.castShadow = true;
+          segment.add(board);
+        }
+        
+        // Olympic-style barriers with advertising boards
+        const barrierGeo = new THREE.BoxGeometry(0.02, 0.2, SEGMENT_SIZE);
+        const barrierMat = new THREE.MeshPhongMaterial({ 
+          color: 0x0066ff,
+          emissive: 0x0033aa,
+          emissiveIntensity: 0.2
+        });
+        
+        const leftBarrier = new THREE.Mesh(barrierGeo, barrierMat);
+        leftBarrier.position.set(-0.5, -0.1, 0);
+        leftBarrier.castShadow = true;
+        segment.add(leftBarrier);
+        
+        const rightBarrier = new THREE.Mesh(barrierGeo, barrierMat);
+        rightBarrier.position.set(0.5, -0.1, 0);
+        rightBarrier.castShadow = true;
+        segment.add(rightBarrier);
+        
+        // Ad boards on barriers
+        if (i % 2 === 0) {
+          const adGeo = new THREE.PlaneGeometry(0.15, 0.08);
+          const adMat = new THREE.MeshPhongMaterial({
+            color: 0xFFD700,
+            emissive: 0xFFD700,
+            emissiveIntensity: 0.2,
+            side: THREE.DoubleSide
+          });
+          const leftAd = new THREE.Mesh(adGeo, adMat);
+          leftAd.position.set(-0.49, 0, 0);
+          leftAd.rotation.y = Math.PI / 2;
+          segment.add(leftAd);
+          
+          const rightAd = new THREE.Mesh(adGeo, adMat);
+          rightAd.position.set(0.49, 0, 0);
+          rightAd.rotation.y = -Math.PI / 2;
+          segment.add(rightAd);
+        }
+        
+        segment.position.z = -0.8 - (i * SEGMENT_SIZE);
+        segment.userData.originalZ = segment.position.z;
+        trackSegments.push(segment);
+        scene.add(segment);
+      }
+    }
+
+    function createFinishLine() {
+      const finishGroup = new THREE.Group();
+      
+      // Checkered finish line pattern
+      const checkerSize = 0.05;
+      for (let x = -10; x <= 10; x++) {
+        for (let z = 0; z < 4; z++) {
+          const checkerGeo = new THREE.PlaneGeometry(checkerSize, checkerSize);
+          const checkerMat = new THREE.MeshBasicMaterial({ 
+            color: (x + z) % 2 === 0 ? 0xffffff : 0x000000,
+            side: THREE.DoubleSide
+          });
+          const checker = new THREE.Mesh(checkerGeo, checkerMat);
+          checker.rotation.x = -Math.PI / 2;
+          checker.position.set(x * checkerSize - 0.5, -0.197, z * checkerSize - 0.1);
+          finishGroup.add(checker);
+        }
+      }
+      
+      // Finish posts with flags
+      const postGeo = new THREE.CylinderGeometry(0.03, 0.03, 0.8, 12);
+      const postMat = new THREE.MeshPhongMaterial({
+        color: 0xFFD700,
+        emissive: 0xFFD700,
+        emissiveIntensity: 0.4,
+        metalness: 0.8
+      });
+      
+      const leftPost = new THREE.Mesh(postGeo, postMat);
+      leftPost.position.set(-0.6, 0.2, 0);
+      leftPost.castShadow = true;
+      finishGroup.add(leftPost);
+      
+      const rightPost = new THREE.Mesh(postGeo, postMat);
+      rightPost.position.set(0.6, 0.2, 0);
+      rightPost.castShadow = true;
+      finishGroup.add(rightPost);
+      
+      // Finish banner with "FINISH" text effect
+      const bannerGeo = new THREE.PlaneGeometry(1.2, 0.2);
+      const bannerMat = new THREE.MeshPhongMaterial({
+        color: 0xFFD700,
+        emissive: 0xFFD700,
+        emissiveIntensity: 0.3,
+        side: THREE.DoubleSide,
+        metalness: 0.5
+      });
+      const banner = new THREE.Mesh(bannerGeo, bannerMat);
+      banner.position.set(0, 0.5, 0);
+      finishGroup.add(banner);
+      
+      // Add "FINISH" letters as 3D objects
+      const letterGeo = new THREE.BoxGeometry(0.08, 0.12, 0.02);
+      const letterMat = new THREE.MeshPhongMaterial({
+        color: 0x000000,
+        emissive: 0x000000,
+        emissiveIntensity: 0.1
+      });
+      
+      for(let i = 0; i < 6; i++) {
+        const letter = new THREE.Mesh(letterGeo, letterMat);
+        letter.position.set(-0.3 + i * 0.12, 0.5, 0.02);
+        finishGroup.add(letter);
+      }
+      
+      finishLine = finishGroup;
+      finishLine.position.z = -0.8 - RACE_DISTANCE;
+      scene.add(finishLine);
+    }
+
+    function animateAthlete(athlete, deltaTime, speed, phase) {
+      if (!athlete) return phase;
+      
+      phase += speed * deltaTime * 12;
+      
+      const leftArm = athlete.getObjectByName('leftArm');
+      const rightArm = athlete.getObjectByName('rightArm');
+      const leftLeg = athlete.getObjectByName('leftLeg');
+      const rightLeg = athlete.getObjectByName('rightLeg');
+      
+      // More dynamic running animation
+      const armSwing = Math.sin(phase) * 0.9;
+      const legSwing = Math.sin(phase) * 0.7;
+      const bodyLean = speed > 3 ? 0.15 : 0.05;
+      
+      if (leftArm) {
+        leftArm.rotation.x = armSwing;
+        leftArm.rotation.z = Math.abs(armSwing) * 0.1;
+      }
+      if (rightArm) {
+        rightArm.rotation.x = -armSwing;
+        rightArm.rotation.z = -Math.abs(armSwing) * 0.1;
+      }
+      if (leftLeg) {
+        leftLeg.rotation.x = -legSwing;
+        const calf = leftLeg.children[1];
+        if (calf) calf.rotation.x = Math.max(0, -legSwing * 0.8);
+      }
+      if (rightLeg) {
+        rightLeg.rotation.x = legSwing;
+        const calf = rightLeg.children[1];
+        if (calf) calf.rotation.x = Math.max(0, legSwing * 0.8);
+      }
+      
+      // Body movement and lean
+      athlete.position.y = Math.abs(Math.sin(phase * 2)) * 0.025;
+      athlete.rotation.x = bodyLean;
+      athlete.rotation.y = Math.sin(phase * 0.5) * 0.05;
+      
+      return phase;
+    }
+
+    function updateOpponents(deltaTime) {
+      if (!raceStarted || gameState !== 'racing') return;
+      
+      opponents.forEach((opponent, i) => {
+        const data = opponentData[i];
+        
+        if (data.finished) return;
+        
+        // Realistic acceleration curve
+        const raceProgress = data.distance / RACE_DISTANCE;
+        let targetSpeed;
+        
+        if (raceProgress < 0.3) {
+          // Acceleration phase
+          targetSpeed = 4.5 * data.acceleration * (1 + raceProgress * 2);
+        } else if (raceProgress < 0.7) {
+          // Max speed phase
+          targetSpeed = 5.5 * data.speed;
+        } else {
+          // Slight deceleration at end
+          targetSpeed = 5.3 * data.speed * (1 - (raceProgress - 0.7) * 0.2);
+        }
+        
+        // Add some variation
+        targetSpeed += Math.sin(raceTime * 3 + i * 2) * 0.2;
+        
+        // Smooth speed transitions
+        data.currentSpeed = THREE.MathUtils.lerp(data.currentSpeed, targetSpeed, 0.1);
+        
+        data.distance += data.currentSpeed * deltaTime;
+        
+        if (data.distance >= RACE_DISTANCE && !data.finished) {
+          data.finished = true;
+          data.finishTime = raceTime;
+        }
+        
+        // Update position relative to player view
+        const relativeZ = -0.8 - data.distance + runnerDistance;
+        opponent.position.z = relativeZ;
+        
+        // Animate with current speed
+        data.animPhase = animateAthlete(opponent, deltaTime, data.currentSpeed, data.animPhase);
+      });
+    }
+
+    function updateTrack(deltaTime) {
+      trackSpeed = runnerSpeed * 2;
+      
+      trackSegments.forEach((segment, i) => {
+        segment.position.z += trackSpeed * deltaTime;
+        
+        if (segment.position.z > 2) {
+          let furthestZ = -2;
+          trackSegments.forEach(s => {
+            if (s.position.z < furthestZ) furthestZ = s.position.z;
+          });
+          segment.position.z = furthestZ - SEGMENT_SIZE;
+        }
+      });
+      
+      if (finishLine) {
+        finishLine.position.z = -0.8 - RACE_DISTANCE + runnerDistance;
+      }
+      
+      if (raceStarted && !raceFinished && gameState === 'racing') {
+        runnerDistance += trackSpeed * deltaTime;
+        raceTime += deltaTime;
+        
+        const displayDistance = Math.min(Math.floor(runnerDistance), RACE_DISTANCE);
+        document.getElementById('distance').textContent = displayDistance + 'm';
+        document.getElementById('time').textContent = raceTime.toFixed(2) + 's';
+        document.getElementById('speed').textContent = Math.floor(runnerSpeed * 10) + ' km/h';
+        
+        if (runnerDistance >= RACE_DISTANCE) {
+          finishRace();
+        }
+      }
+    }
+
+    function finishRace() {
+      raceFinished = true;
+      gameState = 'finished';
+      
+      // Calculate position
+      let position = 1;
+      opponentData.forEach(data => {
+        if (data.finished && data.finishTime < raceTime) position++;
+      });
+      
+      // Show results
+      const resultDiv = document.getElementById('result');
+      const resultText = document.getElementById('result-text');
+      const resultTime = document.getElementById('result-time');
+      
+      let medal = '';
+      if (position === 1) {
+        medal = '🥇';
+        resultText.style.color = '#FFD700';
+      } else if (position === 2) {
+        medal = '🥈';
+        resultText.style.color = '#C0C0C0';
+      } else if (position === 3) {
+        medal = '🥉';
+        resultText.style.color = '#CD7F32';
+      } else {
+        medal = '';
+        resultText.style.color = '#FFFFFF';
+      }
+      
+      resultText.innerHTML = `${medal} Position: ${position}/5 ${medal}`;
+      resultTime.innerHTML = `Your Time: ${raceTime.toFixed(2)}s`;
+      
+      // Update best time
+      if (!bestTime || raceTime < bestTime) {
+        bestTime = raceTime;
+        localStorage.setItem('bestTime100m', bestTime.toString());
+        document.getElementById('best-time').innerHTML = `🏆 NEW PERSONAL BEST! 🏆`;
+        document.getElementById('best-time').style.color = '#FFD700';
+      } else {
+        document.getElementById('best-time').innerHTML = `Personal Best: ${bestTime.toFixed(2)}s`;
+        document.getElementById('best-time').style.color = '#C0C0C0';
+      }
+      
+      resultDiv.style.display = 'block';
+      
+      // Reset for next race after 3 seconds
+      setTimeout(() => {
+        resetRace();
+      }, 3000);
+    }
+
+    function resetRace() {
+      // Hide result screen
+      document.getElementById('result').style.display = 'none';
+      
+      // Reset runner
+      runnerDistance = 0;
+      runnerSpeed = 0;
+      runnerAnimPhase = 0;
+      runner.position.set(0, 0, -0.8);
+      
+      // Reset opponents
+      opponentData.forEach((data, i) => {
+        data.distance = 0;
+        data.currentSpeed = 0;
+        data.finished = false;
+        data.finishTime = 0;
+        data.animPhase = Math.random() * Math.PI;
+        opponents[i].position.set(data.profile.lane, 0, -0.8);
+      });
+      
+      // Reset race state
+      raceTime = 0;
+      raceStarted = false;
+      raceFinished = false;
+      gameState = 'waiting';
+      
+      // Reset track
+      trackSegments.forEach((segment, i) => {
+        segment.position.z = segment.userData.originalZ;
+      });
+      
+      if (finishLine) {
+        finishLine.position.z = -0.8 - RACE_DISTANCE;
+      }
+      
+      // Update HUD
+      document.getElementById('distance').textContent = '0m';
+      document.getElementById('time').textContent = '0.00s';
+      document.getElementById('speed').textContent = '0 km/h';
+      
+      // Start new controller selection
+      startControllerSelection();
+    }
+
+    function startCountdown() {
+      countdownActive = true;
+      gameState = 'countdown';
+      let count = 3;
+      
+      const countdownDiv = document.getElementById('countdown');
+      countdownDiv.style.display = 'block';
+      
+      const countInterval = setInterval(() => {
+        if (count > 0) {
+          countdownDiv.textContent = count;
+          count--;
+        } else {
+          countdownDiv.textContent = 'GO!';
+          setTimeout(() => {
+            countdownDiv.style.display = 'none';
+            countdownActive = false;
+            raceStarted = true;
+            gameState = 'racing';
+          }, 500);
+          clearInterval(countInterval);
+        }
+      }, 1000);
+    }
